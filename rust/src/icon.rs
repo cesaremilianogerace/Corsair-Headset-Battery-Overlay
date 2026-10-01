@@ -34,8 +34,7 @@ pub fn light_taskbar() -> bool {
 }
 
 pub fn render(glyph: Glyph, size: i32, light: bool) -> HICON {
-    let fg = if light { draw::DARK_FG } else { draw::LIGHT_FG };
-    to_icon(&draw::draw(glyph, size, fg))
+    to_icon(&draw::draw(glyph, size, light))
 }
 
 fn to_icon(canvas: &draw::Canvas) -> HICON {

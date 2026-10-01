@@ -8,26 +8,68 @@ pub enum Glyph {
     Battery { level: u8, low: bool, charging: bool },
 }
 
-pub const DARK_FG: [f32; 3] = [0.10, 0.10, 0.10];
-pub const LIGHT_FG: [f32; 3] = [1.0, 1.0, 1.0];
+const DARK_FG: [f32; 3] = [0.10, 0.10, 0.10];
+const LIGHT_FG: [f32; 3] = [1.0, 1.0, 1.0];
 const RED: [f32; 3] = [0.91, 0.22, 0.22];
 const GREEN: [f32; 3] = [0.25, 0.78, 0.35];
+/// Battery percentage digits: yellow on a dark taskbar, amber on a light one.
+const YELLOW: [f32; 3] = [1.0, 0.85, 0.10];
+const AMBER: [f32; 3] = [0.62, 0.38, 0.0];
 const HEADSET_OPACITY: f32 = 0.6;
+/// Empty part of the level bar.
+const TRACK_OPACITY: f32 = 0.3;
 /// The .exe icon has no theme to follow: a gray readable on light and dark.
 #[allow(dead_code)] // used by build.rs
 const APP_ICON_GRAY: [f32; 3] = [0.55, 0.55, 0.55];
 
-/// Lightning bolt on a 32x32 design grid.
-const BOLT: [(f32, f32); 6] = [(16.0, 7.5), (10.5, 17.0), (14.0, 17.0), (12.5, 24.5), (18.5, 15.0), (15.0, 15.0)];
+/// Seven-segment masks for 0-9; bit 0..6 = segments a..g.
+const SEGMENTS: [u8; 10] = [0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F];
+const DASH: u8 = 0x40; // segment g only
 
-pub fn draw(glyph: Glyph, size: i32, fg: [f32; 3]) -> Canvas {
+/// How the tray shows the battery level; pick one with `TRAY_STYLE`.
+#[derive(Clone, Copy)]
+#[allow(dead_code)] // the unused style stays available
+pub enum TrayStyle {
+    /// Percentage on top, small battery with the level underneath.
+    NumberOverBattery,
+    /// Two big digits ("00" = 100%, "--" = 0%) over a level bar.
+    DigitsOverBar,
+}
+
+pub const TRAY_STYLE: TrayStyle = TrayStyle::NumberOverBattery;//DigitsOverBar; //TrayStyle::NumberOverBattery
+
+/// Tray glyph; `light` = light taskbar (glyphs drawn dark).
+pub fn draw(glyph: Glyph, size: i32, light: bool) -> Canvas {
+    draw_styled(glyph, size, light, TRAY_STYLE)
+}
+
+fn draw_styled(glyph: Glyph, size: i32, light: bool, style: TrayStyle) -> Canvas {
     let s = size as f32;
+    let fg = if light { DARK_FG } else { LIGHT_FG };
     let mut c = Canvas::new(size as usize);
     match glyph {
         Glyph::Headset => headset(&mut c, s, fg, HEADSET_OPACITY),
-        Glyph::Battery { level, low, charging } => battery(&mut c, 0.0, 0.0, s, fg, level, low, charging),
+        Glyph::Battery { level, low, charging } => {
+            let colors = Colors {
+                fg,
+                level: if charging { GREEN } else if low { RED } else { fg },
+                digits: if light { AMBER } else { YELLOW },
+            };
+            match style {
+                TrayStyle::NumberOverBattery => number_over_battery(&mut c, s, colors, level),
+                TrayStyle::DigitsOverBar => digits_over_bar(&mut c, s, colors, level),
+            }
+        }
     }
     c
+}
+
+#[derive(Clone, Copy)]
+struct Colors {
+    fg: [f32; 3],
+    /// Battery fill / bar: plain, low (red) or charging (green).
+    level: [f32; 3],
+    digits: [f32; 3],
 }
 
 /// The .exe icon: the headset with a half-full battery between the ear cups.
@@ -37,7 +79,7 @@ pub fn draw_app_icon(size: i32) -> Canvas {
     let mut c = Canvas::new(size as usize);
     headset(&mut c, s, APP_ICON_GRAY, 1.0);
     let bs = s * 0.45; // battery glyph size
-    battery(&mut c, (s * 0.5 - bs * 0.5).round(), (s * 0.67 - bs * 0.5).round(), bs, APP_ICON_GRAY, 50, false, false);
+    battery(&mut c, (s * 0.5 - bs * 0.5).round(), (s * 0.67 - bs * 0.5).round(), bs, APP_ICON_GRAY, 50);
     c
 }
 
@@ -55,8 +97,8 @@ fn headset(c: &mut Canvas, s: f32, fg: [f32; 3], opacity: f32) {
 
 /// Battery glyph in the `s`-sized square at (`ox`, `oy`). Anything already
 /// on the canvas around it is cleared so it stays readable when overlaid.
-#[allow(clippy::too_many_arguments)]
-fn battery(c: &mut Canvas, ox: f32, oy: f32, s: f32, fg: [f32; 3], level: u8, low: bool, charging: bool) {
+#[allow(dead_code)] // used by build.rs
+fn battery(c: &mut Canvas, ox: f32, oy: f32, s: f32, fg: [f32; 3], level: u8) {
     let t = stroke(s);
     let h = t / 2.0;
     // Edges snapped to whole pixels so the outline stays sharp at 16px.
@@ -73,15 +115,113 @@ fn battery(c: &mut Canvas, ox: f32, oy: f32, s: f32, fg: [f32; 3], level: u8, lo
         let (il, it, ir, ib) = (l + 2.0 * t, top + 2.0 * t, r - 2.0 * t, bot - 2.0 * t);
         // Never thinner than one stroke, so low levels stay visible.
         let fill_r = il + ((ir - il) * level as f32 / 100.0).max(t);
-        let color = if charging { GREEN } else if low { RED } else { fg };
-        c.fill(color, 1.0, |x, y| sd_box(x, y, il, it, fill_r, ib, h));
+        c.fill(fg, 1.0, |x, y| sd_box(x, y, il, it, fill_r, ib, h));
+    }
+}
+
+/// Percentage across the top, a short battery along the bottom edge.
+fn number_over_battery(c: &mut Canvas, s: f32, colors: Colors, level: u8) {
+    let t = stroke(s);
+    let h = t / 2.0;
+    let nub_w = (s / 16.0).round().max(1.0);
+    let (l, r) = (0.0, s - nub_w);
+    let (top, bot) = (s - (s * 0.375).round(), s);
+    let inset = (bot - top) * 0.3;
+    let (nub_t, nub_b) = ((top + inset).round(), (bot - inset).round());
+
+    c.fill(colors.fg, 1.0, |x, y| sd_box(x, y, l + h, top + h, r - h, bot - h, t).abs() - h);
+    c.fill(colors.fg, 1.0, |x, y| sd_box(x, y, r, nub_t, s, nub_b, 0.0));
+    if level > 0 {
+        // Gap between outline and fill only when there is room for it.
+        let gap = if bot - top - 4.0 * t >= 2.0 { t } else { 0.0 };
+        let (il, it, ir, ib) = (l + t + gap, top + t + gap, r - t - gap, bot - t - gap);
+        // Never thinner than one stroke, so low levels stay visible.
+        let fill_r = il + ((ir - il) * level as f32 / 100.0).max(t);
+        c.fill(colors.level, 1.0, |x, y| sd_box(x, y, il, it, fill_r, ib, 0.0));
     }
 
-    if charging {
-        let bolt = BOLT.map(|(x, y)| (ox + x * s / 32.0, oy + y * s / 32.0));
-        c.erase(|x, y| sd_polygon(x, y, &bolt) - t);
-        c.fill(fg, 1.0, |x, y| sd_polygon(x, y, &bolt));
+    let room = top - t;
+    let (ds, dh) = digit_metrics(room, 8.0);
+    let dw = (dh * 0.6).round();
+    // A narrow "1" so "100" fits at 16px.
+    let cells: Vec<(u8, f32)> = level
+        .to_string()
+        .bytes()
+        .map(|b| (b - b'0') as usize)
+        .map(|d| (SEGMENTS[d], if d == 1 { ds } else { dw }))
+        .collect();
+    let y0 = ((room - dh) / 2.0).floor();
+    draw_digits(c, colors.digits, &cells, s, y0, dh, ds, ds);
+}
+
+/// Two digits as large as possible over a full-width level bar.
+fn digits_over_bar(c: &mut Canvas, s: f32, colors: Colors, level: u8) {
+    let bar_h = (s / 8.0).round().max(2.0);
+    let bar_t = s - bar_h;
+    c.fill(colors.fg, TRACK_OPACITY, |x, y| sd_box(x, y, 0.0, bar_t, s, s, 0.0));
+    if level > 0 {
+        let fill_r = (s * level as f32 / 100.0).max(1.0);
+        c.fill(colors.level, 1.0, |x, y| sd_box(x, y, 0.0, bar_t, fill_r, s, 0.0));
     }
+
+    let room = bar_t - stroke(s);
+    let (ds, dh) = digit_metrics(room, 7.0);
+    let spacing = (ds - 1.0).max(1.0);
+    let dw = (dh * 0.6).round().min(((s - spacing) / 2.0).floor());
+    let masks = match level {
+        0 => [DASH, DASH],
+        100.. => [SEGMENTS[0], SEGMENTS[0]],
+        n => [SEGMENTS[(n / 10) as usize], SEGMENTS[(n % 10) as usize]],
+    };
+    let y0 = ((room - dh) / 2.0).floor();
+    draw_digits(c, colors.digits, &masks.map(|m| (m, dw)), s, y0, dh, ds, spacing);
+}
+
+/// Stroke and height for digits filling `room` pixels: the height is
+/// adjusted so the middle bar lands on whole pixels.
+fn digit_metrics(room: f32, stroke_ratio: f32) -> (f32, f32) {
+    let ds = (room / stroke_ratio).round().max(1.0);
+    let dh = if (room - ds) % 2.0 == 0.0 { room } else { room - 1.0 };
+    (ds, dh)
+}
+
+/// Seven-segment `cells` (mask, width), centered horizontally in the icon.
+#[allow(clippy::too_many_arguments)]
+fn draw_digits(c: &mut Canvas, color: [f32; 3], cells: &[(u8, f32)], s: f32, y0: f32, dh: f32, ds: f32, spacing: f32) {
+    let total = cells.iter().map(|&(_, w)| w).sum::<f32>() + spacing * (cells.len() - 1) as f32;
+    let mut x0 = ((s - total) / 2.0).round();
+    let placed: Vec<(u8, f32, f32)> = cells
+        .iter()
+        .map(|&(mask, w)| {
+            let cell = (mask, x0, w);
+            x0 += w + spacing;
+            cell
+        })
+        .collect();
+    c.fill(color, 1.0, |x, y| {
+        placed.iter().fold(f32::MAX, |m, &(mask, x0, w)| m.min(sd_segments(x, y, mask, x0, y0, w, dh, ds)))
+    });
+}
+
+/// Signed distance to the seven-segment `mask` with its top-left at (`x0`, `y0`).
+#[allow(clippy::too_many_arguments)]
+fn sd_segments(x: f32, y: f32, mask: u8, x0: f32, y0: f32, w: f32, h: f32, ds: f32) -> f32 {
+    let (x1, y1) = (x0 + w, y0 + h);
+    let ym = y0 + (h - ds) / 2.0; // top of the middle bar
+    let segments = [
+        (x0, y0, x1, y0 + ds),      // a: top
+        (x1 - ds, y0, x1, ym + ds), // b: upper right
+        (x1 - ds, ym, x1, y1),      // c: lower right
+        (x0, y1 - ds, x1, y1),      // d: bottom
+        (x0, ym, x0 + ds, y1),      // e: lower left
+        (x0, y0, x0 + ds, ym + ds), // f: upper left
+        (x0, ym, x1, ym + ds),      // g: middle
+    ];
+    segments
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| mask & (1 << i) != 0)
+        .fold(f32::MAX, |m, (_, &(l, t, r, b))| m.min(sd_box(x, y, l, t, r, b, 0.0)))
 }
 
 /// Stroke width in whole pixels.
@@ -156,56 +296,41 @@ fn sd_box(x: f32, y: f32, l: f32, t: f32, r: f32, b: f32, radius: f32) -> f32 {
     qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - radius
 }
 
-/// Signed distance to a simple polygon (Inigo Quilez).
-fn sd_polygon(x: f32, y: f32, v: &[(f32, f32)]) -> f32 {
-    let mut d = (x - v[0].0).powi(2) + (y - v[0].1).powi(2);
-    let mut sign = 1.0;
-    let mut j = v.len() - 1;
-    for i in 0..v.len() {
-        let (ex, ey) = (v[j].0 - v[i].0, v[j].1 - v[i].1);
-        let (wx, wy) = (x - v[i].0, y - v[i].1);
-        let k = ((wx * ex + wy * ey) / (ex * ex + ey * ey)).clamp(0.0, 1.0);
-        let (bx, by) = (wx - ex * k, wy - ey * k);
-        d = d.min(bx * bx + by * by);
-        let c = (y >= v[i].1, y < v[j].1, ex * wy > ey * wx);
-        if (c.0 && c.1 && c.2) || (!c.0 && !c.1 && !c.2) {
-            sign = -sign;
-        }
-        j = i;
-    }
-    sign * d.sqrt()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Writes every tray glyph (dark and light taskbar) plus the .exe icon at
-    /// common sizes to `target/icon_preview.bgra` (header: width, height as
-    /// u32 LE) for visual inspection.
+    /// Writes the tray glyphs in both styles (dark and light taskbar) plus the
+    /// .exe icon at common sizes to `target/icon_preview.bgra` (header:
+    /// width, height as u32 LE) for visual inspection.
     #[test]
     fn preview_sheet() {
-        let glyphs = [
-            Some(Glyph::Headset),
-            Some(Glyph::Battery { level: 100, low: false, charging: false }),
-            Some(Glyph::Battery { level: 60, low: false, charging: false }),
-            Some(Glyph::Battery { level: 30, low: false, charging: false }),
-            Some(Glyph::Battery { level: 10, low: true, charging: false }),
-            Some(Glyph::Battery { level: 50, low: false, charging: true }),
-            None, // .exe icon
+        let levels = [
+            Glyph::Battery { level: 100, low: false, charging: false },
+            Glyph::Battery { level: 87, low: false, charging: false },
+            Glyph::Battery { level: 42, low: false, charging: false },
+            Glyph::Battery { level: 9, low: true, charging: false },
+            Glyph::Battery { level: 56, low: false, charging: true },
+            Glyph::Battery { level: 0, low: true, charging: false },
         ];
+        let mut columns: Vec<Option<(Glyph, TrayStyle)>> = vec![Some((Glyph::Headset, TRAY_STYLE))];
+        for style in [TrayStyle::NumberOverBattery, TrayStyle::DigitsOverBar] {
+            columns.extend(levels.iter().map(|&g| Some((g, style))));
+        }
+        columns.push(None); // .exe icon
+
         let sizes = [16, 20, 24, 32, 40, 48];
         let (cell, pad) = (48usize, 8usize);
-        let (w, h) = (glyphs.len() * (cell + pad), sizes.len() * 2 * (cell + pad));
+        let (w, h) = (columns.len() * (cell + pad), sizes.len() * 2 * (cell + pad));
         let mut sheet = vec![0u32; w * h];
-        for (row, fg) in [LIGHT_FG, DARK_FG].into_iter().enumerate() {
+        for (row, light) in [false, true].into_iter().enumerate() {
             for (si, &size) in sizes.iter().enumerate() {
-                for (gi, glyph) in glyphs.iter().enumerate() {
-                    let px = match glyph {
-                        Some(g) => draw(*g, size, fg).bgra(),
+                for (ci, column) in columns.iter().enumerate() {
+                    let px = match column {
+                        Some((g, style)) => draw_styled(*g, size, light, *style).bgra(),
                         None => draw_app_icon(size).bgra(),
                     };
-                    let (ox, oy) = (gi * (cell + pad), (row * sizes.len() + si) * (cell + pad));
+                    let (ox, oy) = (ci * (cell + pad), (row * sizes.len() + si) * (cell + pad));
                     for y in 0..size as usize {
                         for x in 0..size as usize {
                             sheet[(oy + y) * w + ox + x] = px[y * size as usize + x];
