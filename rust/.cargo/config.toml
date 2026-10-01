@@ -1,0 +1,9 @@
+# "Hybrid CRT": link the VC runtime statically but the Universal CRT dynamically
+# (ucrtbase.dll ships with Windows 10/11). No VC++ redistributable is needed and
+# the exe stays small.
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=/NODEFAULTLIB:libucrt.lib",
+    "-C", "link-arg=/DEFAULTLIB:ucrt.lib",
+]
